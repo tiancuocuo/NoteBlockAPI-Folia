@@ -53,6 +53,20 @@ public class EntitySongPlayer extends RangeSongPlayer {
         return entity;
     }
 
+    /**
+     * Fires song lifecycle events on the entity's own region thread, so listeners
+     * (e.g. MusicBox advancing a speaker's playlist) can safely touch the entity.
+     */
+    @Override
+    protected void fireEvent(org.bukkit.event.Event event) {
+        Entity e = entity;
+        if (e != null) {
+            e.getScheduler().run(plugin, task -> Bukkit.getPluginManager().callEvent(event), () -> {});
+        } else {
+            super.fireEvent(event);
+        }
+    }
+
     @Override
     public void playTick(Player player, int tick) {
         if (entity.isDead()){

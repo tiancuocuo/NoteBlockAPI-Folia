@@ -5,7 +5,9 @@ import com.xxmicloxx.NoteBlockAPI.event.*;
 import com.xxmicloxx.NoteBlockAPI.model.*;
 import com.xxmicloxx.NoteBlockAPI.model.playmode.ChannelMode;
 import com.xxmicloxx.NoteBlockAPI.model.playmode.MonoMode;
+import com.xxmicloxx.NoteBlockAPI.utils.FoliaCompat;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.entity.Player;
 
 import java.lang.reflect.Constructor;
@@ -309,8 +311,9 @@ public abstract class SongPlayer {
 	 * Starts this SongPlayer
 	 */
 	private void start() {
-		plugin.doAsync(() -> {
-			while (!destroyed) {
+		Thread thread = new Thread(() -> {
+			try {
+				while (!destroyed) {
 				long startTime = System.currentTimeMillis();
 				lock.lock();
 				try {
@@ -325,7 +328,7 @@ public abstract class SongPlayer {
 								fading = false;
 								if (!playing) {
 									SongStoppedEvent event = new SongStoppedEvent(this);
-									plugin.doSync(() -> Bukkit.getPluginManager().callEvent(event));
+									fireEvent(event);
 									volume = fadeIn.getFadeTarget();
 									continue;
 								}
@@ -357,7 +360,7 @@ public abstract class SongPlayer {
 							volume = fadeIn.getFadeTarget();
 							if (repeat == RepeatMode.ONE){
 								SongLoopEvent event = new SongLoopEvent(this);
-								plugin.doSync(() -> Bukkit.getPluginManager().callEvent(event));
+								fireEvent(event);
 
 								if (!event.isCancelled()) {
 									continue;
@@ -383,7 +386,7 @@ public abstract class SongPlayer {
 										CallUpdate("song", song);
 										if (repeat == RepeatMode.ALL) {
 											SongLoopEvent event = new SongLoopEvent(this);
-											plugin.doSync(() -> Bukkit.getPluginManager().callEvent(event));
+											fireEvent(event);
 
 											if (!event.isCancelled()) {
 												continue;
@@ -395,7 +398,7 @@ public abstract class SongPlayer {
 
 										CallUpdate("song", song);
 										SongNextEvent event = new SongNextEvent(this);
-										plugin.doSync(() -> Bukkit.getPluginManager().callEvent(event));
+										fireEvent(event);
 										continue;
 									}
 								} else {
@@ -404,7 +407,7 @@ public abstract class SongPlayer {
 										song = playlist.get(actualSong);
 										CallUpdate("song", song);
 										SongNextEvent event = new SongNextEvent(this);
-										plugin.doSync(() -> Bukkit.getPluginManager().callEvent(event));
+										fireEvent(event);
 										continue;
 									} else {
 										actualSong = 0;
@@ -412,7 +415,7 @@ public abstract class SongPlayer {
 										CallUpdate("song", song);
 										if (repeat == RepeatMode.ALL) {
 											SongLoopEvent event = new SongLoopEvent(this);
-											plugin.doSync(() -> Bukkit.getPluginManager().callEvent(event));
+											fireEvent(event);
 
 											if (!event.isCancelled()) {
 												continue;
@@ -423,7 +426,7 @@ public abstract class SongPlayer {
 							}
 							playing = false;
 							SongEndEvent event = new SongEndEvent(this);
-							plugin.doSync(() -> Bukkit.getPluginManager().callEvent(event));
+							fireEvent(event);
 							if (autoDestroy) {
 								destroy();
 							}
@@ -431,24 +434,27 @@ public abstract class SongPlayer {
 						}
 						CallUpdate("tick", tick);
 						
-						plugin.doSync(() -> {
-							try {
-								for (UUID uuid : playerList.keySet()) {
-									Player player = Bukkit.getPlayer(uuid);
-									if (player == null) {
-										// offline...
-										continue;
-									}
-									playTick(player, tick);
-								}
-							} catch (Exception e){
-								Bukkit.getLogger().severe("An error occurred during the playback of song "
-										+ (song != null ?
-										song.getPath() + " (" + song.getAuthor() + " - " + song.getTitle() + ")"
-										: "null"));
-								e.printStackTrace();
+						// Dispatch each player's playback on their own region thread (Folia)
+						// or the main thread (Paper), so entity/block access is thread-safe.
+						for (UUID uuid : playerList.keySet()) {
+							final Player player = Bukkit.getPlayer(uuid);
+							if (player == null) {
+								// offline...
+								continue;
 							}
-						});
+							final int currentTick = tick;
+							FoliaCompat.runAtPlayer(plugin, player, () -> {
+								try {
+									playTick(player, currentTick);
+								} catch (Exception e){
+									Bukkit.getLogger().severe("An error occurred during the playback of song "
+											+ (song != null ?
+											song.getPath() + " (" + song.getAuthor() + " - " + song.getTitle() + ")"
+											: "null"));
+									e.printStackTrace();
+								}
+							});
+						}
 					}
 				} catch (Exception e) {
 					Bukkit.getLogger().severe("An error occurred during the playback of song "
@@ -474,7 +480,32 @@ public abstract class SongPlayer {
 					}
 				}
 			}
-		});
+			} finally {
+				NoteBlockAPI.unregisterSongThread(Thread.currentThread());
+			}
+		}, "NoteBlockAPI-SongThread");
+		NoteBlockAPI.registerSongThread(thread);
+		thread.setDaemon(true);
+		thread.start();
+	}
+
+	/**
+	 * Location whose region should own the Bukkit events fired by this SongPlayer.
+	 * Override in subclasses that are anchored to a block (e.g.
+	 * {@link PositionSongPlayer}) so event listeners can safely touch that block.
+	 * {@code null} fires on the global region thread.
+	 */
+	protected Location getEventLocation() {
+		return null;
+	}
+
+	/**
+	 * Fires a Bukkit event on the region that owns {@link #getEventLocation()}
+	 * (or the global region thread when there is no location). Subclasses anchored
+	 * to an entity may override this to dispatch on the entity's own region instead.
+	 */
+	protected void fireEvent(org.bukkit.event.Event event) {
+		FoliaCompat.runSync(getEventLocation(), plugin, () -> Bukkit.getPluginManager().callEvent(event));
 	}
 
 	private void checkPlaylistQueue(){
@@ -599,7 +630,7 @@ public abstract class SongPlayer {
 		lock.lock();
 		try {
 			SongDestroyingEvent event = new SongDestroyingEvent(this);
-			plugin.doSync(() -> Bukkit.getPluginManager().callEvent(event));
+			fireEvent(event);
 			//Bukkit.getScheduler().cancelTask(threadId);
 			if (event.isCancelled()) {
 				return;
@@ -654,7 +685,7 @@ public abstract class SongPlayer {
 			volume = fadeIn.getFadeTarget();
 			if (!playing) {
 				SongStoppedEvent event = new SongStoppedEvent(this);
-				plugin.doSync(() -> Bukkit.getPluginManager().callEvent(event));
+				fireEvent(event);
 			}
 		}
 
@@ -713,7 +744,7 @@ public abstract class SongPlayer {
 			NoteBlockAPI.setSongPlayersByPlayer(player, songs);
 			if (playerList.isEmpty() && autoDestroy) {
 				SongEndEvent event = new SongEndEvent(this);
-				plugin.doSync(() -> Bukkit.getPluginManager().callEvent(event));
+				fireEvent(event);
 				destroy();
 			}
 		} finally {

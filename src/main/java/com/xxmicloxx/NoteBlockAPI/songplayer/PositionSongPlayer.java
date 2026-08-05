@@ -64,6 +64,11 @@ public class PositionSongPlayer extends RangeSongPlayer {
 		return targetLocation;
 	}
 
+	@Override
+	protected Location getEventLocation() {
+		return getTargetLocation();
+	}
+
 	/**
 	 * Sets location on which is the PositionSongPlayer playing
 	 */

@@ -1,6 +1,7 @@
 package com.xxmicloxx.NoteBlockAPI;
 
 import com.xxmicloxx.NoteBlockAPI.songplayer.SongPlayer;
+import com.xxmicloxx.NoteBlockAPI.utils.FoliaCompat;
 import com.xxmicloxx.NoteBlockAPI.utils.MathUtils;
 import com.xxmicloxx.NoteBlockAPI.utils.Updater;
 import org.bstats.bukkit.Metrics;
@@ -11,8 +12,6 @@ import org.bukkit.event.HandlerList;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.RegisteredListener;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitTask;
-import org.bukkit.scheduler.BukkitWorker;
 
 import java.io.IOException;
 import java.util.*;
@@ -31,6 +30,21 @@ public class NoteBlockAPI extends JavaPlugin {
 	private boolean disabling = false;
 	
 	private HashMap<Plugin, Boolean> dependentPlugins = new HashMap<>();
+
+	// Cancellable handle for the periodic update-checker task (Folia cancels tasks
+	// explicitly instead of BukkitScheduler.cancelTasks).
+	private Object updateTask;
+
+	// All actively running song playback threads, so they can be interrupted on disable.
+	private static final Set<Thread> songThreads = Collections.synchronizedSet(new HashSet<Thread>());
+
+	public static void registerSongThread(Thread thread) {
+		songThreads.add(thread);
+	}
+
+	public static void unregisterSongThread(Thread thread) {
+		songThreads.remove(thread);
+	}
 
 	/**
 	 * Returns true if a Player is currently receiving a song
@@ -145,47 +159,39 @@ public class NoteBlockAPI extends JavaPlugin {
 		
 		new NoteBlockPlayerMain().onEnable();
 		
-		getServer().getScheduler().runTaskLater(this, new Runnable() {
-			
-			@Override
-			public void run() {
-				for (RegisteredListener rl : PlayerRangeStateChangeEvent.getHandlerList().getRegisteredListeners()) {
-					dependentPlugins.put(rl.getPlugin(), true);
-				}
-				for (RegisteredListener rl : SongDestroyingEvent.getHandlerList().getRegisteredListeners()) {
-					dependentPlugins.put(rl.getPlugin(), true);
-				}
-				for (RegisteredListener rl : SongEndEvent.getHandlerList().getRegisteredListeners()) {
-					dependentPlugins.put(rl.getPlugin(), true);
-				}
-				for (RegisteredListener rl : SongStoppedEvent.getHandlerList().getRegisteredListeners()) {
-					dependentPlugins.put(rl.getPlugin(), true);
-				}
-		        
-		        metrics.addCustomChart(new DrilldownPie("deprecated", () -> {
-			        Map<String, Map<String, Integer>> map = new HashMap<>();
-			        for (Plugin pl : dependentPlugins.keySet()){
-			        	String deprecated = dependentPlugins.get(pl) ? "yes" : "no";
-			        	Map<String, Integer> entry = new HashMap<>();
-				        entry.put(pl.getDescription().getFullName(), 1);
-				        map.put(deprecated, entry);
-			        }
-			        return map;
-			    }));
+		FoliaCompat.runDelayed(this, () -> {
+			for (RegisteredListener rl : PlayerRangeStateChangeEvent.getHandlerList().getRegisteredListeners()) {
+				dependentPlugins.put(rl.getPlugin(), true);
 			}
+			for (RegisteredListener rl : SongDestroyingEvent.getHandlerList().getRegisteredListeners()) {
+				dependentPlugins.put(rl.getPlugin(), true);
+			}
+			for (RegisteredListener rl : SongEndEvent.getHandlerList().getRegisteredListeners()) {
+				dependentPlugins.put(rl.getPlugin(), true);
+			}
+			for (RegisteredListener rl : SongStoppedEvent.getHandlerList().getRegisteredListeners()) {
+				dependentPlugins.put(rl.getPlugin(), true);
+			}
+	        
+	        metrics.addCustomChart(new DrilldownPie("deprecated", () -> {
+		        Map<String, Map<String, Integer>> map = new HashMap<>();
+		        for (Plugin pl : dependentPlugins.keySet()){
+		        	String deprecated = dependentPlugins.get(pl) ? "yes" : "no";
+		        	Map<String, Integer> entry = new HashMap<>();
+			        entry.put(pl.getDescription().getFullName(), 1);
+			        map.put(deprecated, entry);
+		        }
+		        return map;
+		    }));
 		}, 1);
 		
-		getServer().getScheduler().runTaskTimerAsynchronously(this, new Runnable() {
-			
-			@Override
-			public void run() {
-				try {
-					if (Updater.checkUpdate("19287", getDescription().getVersion())){
-						Bukkit.getLogger().info(String.format("[%s] New update available!", plugin.getDescription().getName()));
-					}
-				} catch (IOException e) {
-					Bukkit.getLogger().info(String.format("[%s] Cannot receive update from Spigot resource page!", plugin.getDescription().getName()));
+		updateTask = FoliaCompat.runAtFixedRate(this, () -> {
+			try {
+				if (Updater.checkUpdate("19287", getDescription().getVersion())){
+					Bukkit.getLogger().info(String.format("[%s] New update available!", plugin.getDescription().getName()));
 				}
+			} catch (IOException e) {
+				Bukkit.getLogger().info(String.format("[%s] Cannot receive update from Spigot resource page!", plugin.getDescription().getName()));
 			}
 		}, 20*10, 20 * 60 * 60 * 24);
 	}
@@ -193,22 +199,25 @@ public class NoteBlockAPI extends JavaPlugin {
 	@Override
 	public void onDisable() {    	
 		disabling = true;
-		Bukkit.getScheduler().cancelTasks(this);
-		List<BukkitWorker> workers = Bukkit.getScheduler().getActiveWorkers();
-		for (BukkitWorker worker : workers){
-			if (!worker.getOwner().equals(this))
-				continue;
-			worker.getThread().interrupt();
+		if (updateTask != null) {
+			FoliaCompat.cancel(updateTask);
+			updateTask = null;
+		}
+		// Interrupt every running song playback thread so they exit promptly.
+		synchronized (songThreads) {
+			for (Thread thread : songThreads) {
+				thread.interrupt();
+			}
 		}
 		NoteBlockPlayerMain.plugin.onDisable();
 	}
 
 	public void doSync(Runnable runnable) {
-		getServer().getScheduler().runTask(this, runnable);
+		FoliaCompat.runSync(this, runnable);
 	}
 
 	public void doAsync(Runnable runnable) {
-		getServer().getScheduler().runTaskAsynchronously(this, runnable);
+		FoliaCompat.runAsync(this, runnable);
 	}
 
 	public boolean isDisabling() {

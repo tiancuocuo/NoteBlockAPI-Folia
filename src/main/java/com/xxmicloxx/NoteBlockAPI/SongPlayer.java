@@ -14,6 +14,8 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
+import com.xxmicloxx.NoteBlockAPI.utils.FoliaCompat;
+
 /**
  * @deprecated {@link com.xxmicloxx.NoteBlockAPI.songplayer.SongPlayer}
  */
@@ -236,8 +238,9 @@ public abstract class SongPlayer {
 	 * Starts this SongPlayer
 	 */
 	private void start() {
-		plugin.doAsync(() -> {
-			while (!destroyed) {
+		Thread thread = new Thread(() -> {
+			try {
+				while (!destroyed) {
 				long startTime = System.currentTimeMillis();
 				lock.lock();
 				try {
@@ -260,16 +263,15 @@ public abstract class SongPlayer {
 						}
 						CallUpdate("tick", tick);
 
-						plugin.doSync(() -> {
-							for (String s : playerList.keySet()) {
-	                            Player p = Bukkit.getPlayerExact(s);
-	                            if (p == null) {
-	                                // offline...
-	                                continue;
-	                            }
-	                            playTick(p, tick);
-							}
-						});
+						for (String s : playerList.keySet()) {
+		                    final Player p = Bukkit.getPlayerExact(s);
+		                    if (p == null) {
+		                        // offline...
+		                        continue;
+		                    }
+		                    final int currentTick = tick;
+		                    FoliaCompat.runAtPlayer(NoteBlockAPI.getAPI(), p, () -> playTick(p, currentTick));
+						}
 					}
 				} catch (Exception e) {
 					e.printStackTrace();
@@ -291,7 +293,13 @@ public abstract class SongPlayer {
 					}
 				}
 			}
-		});
+			} finally {
+				NoteBlockAPI.unregisterSongThread(Thread.currentThread());
+			}
+		}, "NoteBlockAPI-SongThread");
+		NoteBlockAPI.registerSongThread(thread);
+		thread.setDaemon(true);
+		thread.start();
 	}
 
 	/**

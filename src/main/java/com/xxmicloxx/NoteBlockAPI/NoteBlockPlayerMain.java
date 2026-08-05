@@ -8,6 +8,8 @@ import java.util.Map;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
+import com.xxmicloxx.NoteBlockAPI.utils.FoliaCompat;
+
 /**
  * @deprecated {@link com.xxmicloxx.NoteBlockAPI.NoteBlockAPI}
  */
@@ -78,11 +80,11 @@ public class NoteBlockPlayerMain {
 	}
 
 	public void doSync(Runnable runnable) {
-		Bukkit.getServer().getScheduler().runTask(NoteBlockAPI.getAPI(), runnable);
+		FoliaCompat.runSync(NoteBlockAPI.getAPI(), runnable);
 	}
 
 	public void doAsync(Runnable runnable) {
-		Bukkit.getServer().getScheduler().runTaskAsynchronously(NoteBlockAPI.getAPI(), runnable);
+		FoliaCompat.runAsync(NoteBlockAPI.getAPI(), runnable);
 	}
 
 	public boolean isDisabling() {
